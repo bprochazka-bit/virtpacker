@@ -13,6 +13,12 @@ virtpacker (0.3.0) unstable; urgency=medium
     QEMU on the destination can resolve a supported version, mirroring how
     firmware is already handled. Override with --machine, or preserve the
     bundle's exact type with --keep-machine.
+  * Disk copies are now atomic (written to a sibling temp file and renamed
+    into place), so an interrupted import never leaves a truncated image.
+  * --no-overwrite-disks skips copying a disk whose destination already
+    exists, so re-running an import that failed at the define step (or was
+    interrupted) reuses the already-copied images instead of re-copying them.
+    The free-space preflight accounts for the skipped disks.
 
  -- Bill Prochazka <bprochazka@verostech.com>  Thu, 04 Jun 2026 12:00:00 +0000
 

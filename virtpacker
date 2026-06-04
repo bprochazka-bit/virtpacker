@@ -196,20 +196,37 @@ def on_disk_bytes(path):
 
 
 def copy_sparse(src, dest):
-    """Copy a single file while preserving sparseness.
+    """Copy a single file while preserving sparseness, atomically.
 
     shutil.copy2 streams every byte, so holes in a sparse image are written
     out as real zeroes and the copy balloons to its apparent size. GNU cp can
     detect zero runs (--sparse=always) and reflink on copy-on-write
     filesystems, keeping the copy as small as the original (or smaller). Fall
     back to shutil.copy2 only when cp is unavailable.
+
+    The copy lands on a sibling temp file and is renamed into place with
+    os.replace, so the final path either does not exist or is a complete copy.
+    An interrupted run never leaves a truncated image that a later
+    --no-overwrite-disks run would mistake for good.
     """
-    if have("cp"):
-        run(["cp", "--reflink=auto", "--sparse=always",
-             "--preserve=mode,timestamps", str(src), str(dest)], capture=False)
-    else:
-        warn("cp not found; falling back to a non-sparse copy of %s" % src)
-        shutil.copy2(src, dest)
+    dest = Path(dest)
+    tmp = dest.with_name(dest.name + ".virtpacker.part")
+    try:
+        if have("cp"):
+            run(["cp", "--reflink=auto", "--sparse=always",
+                 "--preserve=mode,timestamps", str(src), str(tmp)],
+                capture=False)
+        else:
+            warn("cp not found; falling back to a non-sparse copy of %s" % src)
+            shutil.copy2(src, tmp)
+        os.replace(tmp, dest)
+    except BaseException:
+        # Never leave a partial temp behind on error or interrupt.
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def fs_anchor(path):
@@ -521,7 +538,8 @@ def portable_machine(machine):
 
 
 def import_bundle(bundle, images_dir, nvram_dir, tpm_dir, owner, start, new_mac,
-                  space_check=True, machine=None, keep_machine=False):
+                  space_check=True, machine=None, keep_machine=False,
+                  no_overwrite_disks=False):
     require_root("importing")
     bundle = Path(bundle)
     manifest = json.loads((bundle / "manifest.json").read_text())
@@ -541,7 +559,11 @@ def import_bundle(bundle, images_dir, nvram_dir, tpm_dir, owner, start, new_mac,
     needs = {}
     disks_b = bundle / "disks"
     if disks_b.is_dir():
-        needs[images_dir] = needs.get(images_dir, 0) + on_disk_bytes(disks_b)
+        for f in sorted(disks_b.iterdir()):
+            # A disk we are going to keep in place costs no new space.
+            if no_overwrite_disks and (images_dir / f.name).exists():
+                continue
+            needs[images_dir] = needs.get(images_dir, 0) + on_disk_bytes(f)
     nvram_b = bundle / "nvram"
     if nvram_b.is_dir():
         needs[nvram_dir] = needs.get(nvram_dir, 0) + on_disk_bytes(nvram_b)
@@ -569,14 +591,21 @@ def import_bundle(bundle, images_dir, nvram_dir, tpm_dir, owner, start, new_mac,
             dest = tpm_dir / base
         else:
             die("unexpected placeholder target: %s" % rel)
-        print("  installing %s -> %s" % (rel, dest))
-        if srcfile.is_dir():
-            if dest.exists():
-                shutil.rmtree(dest)
-            shutil.copytree(srcfile, dest)
+        keep = (no_overwrite_disks and rel.startswith("disks/")
+                and srcfile.is_file() and dest.exists())
+        if keep:
+            print("  keeping existing %s (--no-overwrite-disks)" % dest)
         else:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            copy_sparse(srcfile, dest)
+            print("  installing %s -> %s" % (rel, dest))
+            if srcfile.is_dir():
+                if dest.exists():
+                    shutil.rmtree(dest)
+                shutil.copytree(srcfile, dest)
+            else:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                copy_sparse(srcfile, dest)
+        # Re-apply ownership and labels even when keeping the file, in case a
+        # prior run was interrupted before it got that far.
         chown_tree(dest, user, group)
         relabel(dest)
         text = text.replace("@@%s@@" % placeholder, str(dest))
@@ -702,6 +731,7 @@ def cmd_import(args):
         space_check=not args.no_space_check,
         machine=args.machine,
         keep_machine=args.keep_machine,
+        no_overwrite_disks=args.no_overwrite_disks,
     )
 
 
@@ -747,6 +777,10 @@ def build_parser():
     pi.add_argument("--keep-machine", action="store_true",
                     help="keep the bundle's exact machine type instead of "
                          "aliasing it")
+    pi.add_argument("--no-overwrite-disks", action="store_true",
+                    help="skip copying a disk whose destination already exists "
+                         "(reuse images from a previous run instead of "
+                         "re-copying)")
     pi.add_argument("--start", action="store_true", help="start the VM after define")
     pi.add_argument("--no-space-check", action="store_true",
                     help="skip the destination free-space preflight")

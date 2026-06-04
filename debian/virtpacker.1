@@ -29,6 +29,7 @@ virtpacker \- export and import libvirt virtual machines as portable bundles
 .RB [ \-\-machine
 .IR MACHINE ]
 .RB [ \-\-keep\-machine ]
+.RB [ \-\-no\-overwrite\-disks ]
 .RB [ \-\-start ]
 .RB [ \-\-no\-space\-check ]
 .I BUNDLE
@@ -114,6 +115,12 @@ the destination host's QEMU resolves a version it supports.
 .TP
 .B \-\-keep\-machine
 Keep the bundle's exact machine type instead of aliasing it.
+.TP
+.B \-\-no\-overwrite\-disks
+Skip copying any disk whose destination file already exists, reusing the
+images from a previous run instead of copying them again. Useful when a prior
+import copied the disks but failed at the define step. Disk copies are atomic,
+so an existing destination is always a complete image.
 .TP
 .B \-\-start
 Start the domain after defining it.

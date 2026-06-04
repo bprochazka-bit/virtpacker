@@ -112,6 +112,15 @@ on-disk bytes (sparse-aware) and abort early if the destination filesystem is
 short, rather than failing partway through a large copy. Pass `--no-space-check`
 to skip it.
 
+Disk copies are atomic (written to a temp file and renamed into place), so an
+interrupted import never leaves a truncated image. If an import copies the disks
+but then fails at the define step, re-run it with `--no-overwrite-disks` to reuse
+the already-copied images instead of copying them again:
+
+```
+sudo virtpacker import /tank/bundles/winvm --no-overwrite-disks
+```
+
 On a host that shares a network segment with the source, regenerate the MAC to
 avoid a collision:
 
@@ -139,6 +148,8 @@ sudo virtpacker import /tank/bundles/winvm --new-mac
 - `--machine MACHINE` set the machine type (e.g. `q35`); by default a versioned
   type is aliased so the host picks a supported version
 - `--keep-machine` keep the bundle's exact machine type instead of aliasing it
+- `--no-overwrite-disks` skip copying a disk whose destination already exists
+  (reuse images from a previous run instead of re-copying)
 - `--start` start the domain after defining it
 - `--no-space-check` skip the destination free-space preflight
 
