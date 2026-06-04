@@ -1,0 +1,139 @@
+.TH VIRTPACKER 1 "June 2026" "virtpacker 0.2.0" "User Commands"
+.SH NAME
+virtpacker \- export and import libvirt virtual machines as portable bundles
+.SH SYNOPSIS
+.B virtpacker
+.I list
+.br
+.B virtpacker
+.I export
+.RB [ \-o
+.IR DIR ]
+.RB [ \-\-all ]
+.RB [ \-\-no\-flatten ]
+.RB [ \-\-overwrite ]
+.RI [ NAME ]
+.br
+.B virtpacker
+.I import
+.RB [ \-\-images\-dir
+.IR DIR ]
+.RB [ \-\-nvram\-dir
+.IR DIR ]
+.RB [ \-\-tpm\-dir
+.IR DIR ]
+.RB [ \-\-owner
+.IR USER[:GROUP] ]
+.RB [ \-\-new\-mac ]
+.RB [ \-\-start ]
+.I BUNDLE
+.SH DESCRIPTION
+.B virtpacker
+packs a libvirt domain into a single directory containing the domain XML
+with host paths templated out, the disk images, the UEFI nvram variable
+store, and the swtpm TPM state. The directory is portable and can be
+imported on another host.
+.PP
+On export, disks are copied and by default flattened into standalone qcow2
+images. The nvram file is carried in the bundle and the domain is switched
+to UEFI firmware autoselection so the destination host supplies its own
+firmware build. The swtpm state location is read from the domain XML when
+an explicit backend source is present, and otherwise taken from the
+UUID-derived default directory.
+.PP
+On import, files are written into the host's standard libvirt directories,
+the templated paths are rewritten to their destinations, swtpm state is
+placed where the domain expects it, SELinux labels are restored, and the
+domain is defined.
+.SH COMMANDS
+.TP
+.B list
+List the domains libvirt is aware of.
+.TP
+.B export
+Export one domain, or every domain with \fB\-\-all\fR, into bundle
+directories under the output directory.
+.TP
+.B import
+Import a bundle directory on the current host.
+.SH OPTIONS
+.SS export
+.TP
+.BR \-o ", " \-\-outdir " " \fIDIR\fR
+Directory to write bundles into. Default is the current directory.
+.TP
+.B \-\-all
+Export every defined domain.
+.TP
+.B \-\-no\-flatten
+Copy disks as they are rather than flattening. Refuses if a disk has a
+backing chain.
+.TP
+.B \-\-overwrite
+Replace an existing bundle directory.
+.SS import
+.TP
+.B \-\-images\-dir " " \fIDIR\fR
+Destination for disk images. Default is /var/lib/libvirt/images.
+.TP
+.B \-\-nvram\-dir " " \fIDIR\fR
+Destination for the nvram variable store. Default is
+/var/lib/libvirt/qemu/nvram.
+.TP
+.B \-\-tpm\-dir " " \fIDIR\fR
+Destination directory for an explicit-source swtpm file. Default is
+/var/lib/libvirt/swtpm. TPM state using the UUID-derived layout always goes
+to its UUID path.
+.TP
+.B \-\-owner " " \fIUSER[:GROUP]\fR
+Ownership applied to installed files. Auto-detected (libvirt-qemu or qemu)
+when not given.
+.TP
+.B \-\-new\-mac
+Strip fixed MAC addresses so libvirt regenerates them, avoiding collisions
+on a shared segment.
+.TP
+.B \-\-start
+Start the domain after defining it.
+.SH FILES
+.TP
+.I bundle/manifest.json
+Inventory of the bundle: name, UUID, secure boot flag, disks, nvram, TPM.
+.TP
+.I bundle/domain.xml.template
+Domain XML with paths replaced by placeholders.
+.TP
+.I bundle/disks/
+Disk images.
+.TP
+.I bundle/nvram/
+UEFI variable store.
+.TP
+.I bundle/swtpm/
+TPM state, as a directory or a single file depending on the backend.
+.SH EXAMPLES
+.PP
+Export one domain:
+.PP
+.RS
+.nf
+sudo virtpacker export winvm -o /tank/bundles
+.fi
+.RE
+.PP
+Import it on another host and start it:
+.PP
+.RS
+.nf
+sudo virtpacker import /tank/bundles/winvm --start
+.fi
+.RE
+.SH NOTES
+Export of nvram and swtpm state and all import operations require root.
+The tool assumes system-mode libvirt (qemu:///system).
+.SH SEE ALSO
+.BR virsh (1),
+.BR qemu-img (1),
+.BR swtpm (8),
+.BR restorecon (8),
+.BR semanage (8)

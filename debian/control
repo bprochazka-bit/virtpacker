@@ -1,0 +1,34 @@
+Source: virtpacker
+Section: admin
+Priority: optional
+Maintainer: Bill Prochazka <bprochazka@verostech.com>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+
+Package: virtpacker
+Architecture: all
+Depends: ${misc:Depends},
+         python3,
+         libvirt-clients,
+         qemu-utils
+Recommends: ovmf,
+            swtpm,
+            swtpm-tools
+Suggests: policycoreutils,
+          policycoreutils-python-utils
+Description: portable export and import for libvirt virtual machines
+ virtpacker bundles a libvirt domain into a single self-contained
+ directory holding the domain XML (with all host paths templated out),
+ the disk images, the UEFI nvram variable store, and the swtpm TPM state.
+ The directory can be copied to another host and imported, in the same
+ spirit as a VMware VM folder.
+ .
+ On import the bundle is unpacked into the host's standard libvirt
+ directories, paths are rewritten, swtpm state is placed at the location
+ the domain expects, SELinux labels are restored, and the domain is
+ defined. UEFI firmware uses libvirt autoselection so each host supplies
+ its own OVMF or edk2 build, which keeps bundles portable across distros.
+ .
+ The tool drives virsh and qemu-img and is implemented with the Python
+ standard library only.

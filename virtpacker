@@ -1,0 +1,547 @@
+#!/usr/bin/python3
+"""
+virtpacker - export and import libvirt VMs as portable bundles.
+
+A bundle is a single directory containing the domain XML (with all host
+paths templated out), the disk images, the UEFI nvram var store, and the
+swtpm state directory. The aim is VMware-style portability: copy the
+directory to another host and import it.
+
+What gets handled:
+  disks    copied (and by default flattened to standalone qcow2)
+  nvram    copied into the bundle, path templated
+  loader   not copied. On import the VM uses firmware autoselection so the
+           host picks its own OVMF/edk2 build (portable across distros)
+  swtpm    the emulator TPM state lives at /var/lib/libvirt/swtpm/<uuid>/
+           and is not referenced in the XML, so it is copied explicitly
+  selinux  on import, files land in standard libvirt dirs and are relabeled
+           with restorecon. Non-standard dirs get a semanage fcontext rule
+
+Caveats worth knowing:
+  - Flattening (the default) collapses backing chains and drops internal
+    snapshots. Use --no-flatten to refuse rather than silently flatten a
+    VM that has a backing chain.
+  - Export of nvram/swtpm and import into /var/lib/libvirt both need root.
+  - The qemu user differs by distro (libvirt-qemu on Debian, qemu on RHEL).
+    It is auto-detected but can be overridden with --owner.
+
+Version 0.2.0
+"""
+
+import argparse
+import json
+import os
+import pwd
+import re
+import shutil
+import subprocess
+import sys
+import time
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+VERSION = "0.2.0"
+QEMU_NS = "http://libvirt.org/schemas/domain/qemu/1.0"
+ET.register_namespace("qemu", QEMU_NS)
+
+DEFAULT_IMAGES_DIR = Path("/var/lib/libvirt/images")
+DEFAULT_NVRAM_DIR = Path("/var/lib/libvirt/qemu/nvram")
+SWTPM_BASE = Path("/var/lib/libvirt/swtpm")
+
+# Standard dirs already covered by the stock SELinux fcontext policy.
+STANDARD_DIRS = {DEFAULT_IMAGES_DIR, DEFAULT_NVRAM_DIR, SWTPM_BASE}
+
+
+# ----------------------------------------------------------------------------
+# small helpers
+# ----------------------------------------------------------------------------
+
+def run(cmd, capture=True, check=True):
+    """Run a command, returning stdout text. Raises on non-zero unless check
+    is False."""
+    res = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE if capture else None,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if check and res.returncode != 0:
+        raise RuntimeError(
+            "command failed (%d): %s\n%s"
+            % (res.returncode, " ".join(cmd), res.stderr.strip())
+        )
+    return res.stdout if capture else ""
+
+
+def virsh(*args, check=True):
+    return run(["virsh", *args], check=check)
+
+
+def have(binary):
+    return shutil.which(binary) is not None
+
+
+def warn(msg):
+    print("warning: " + msg, file=sys.stderr)
+
+
+def die(msg, code=1):
+    print("error: " + msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def require_root(action):
+    if os.geteuid() != 0:
+        die("%s needs root (re-run with sudo)" % action)
+
+
+def detect_owner():
+    """Return (user, group) for the qemu process, best effort."""
+    for name in ("libvirt-qemu", "qemu"):
+        try:
+            pwd.getpwnam(name)
+            return name, name
+        except KeyError:
+            continue
+    return "root", "root"
+
+
+def selinux_enabled():
+    if not have("getenforce"):
+        return False
+    try:
+        return run(["getenforce"], check=False).strip() != "Disabled"
+    except Exception:
+        return False
+
+
+def chown_tree(path, user, group):
+    try:
+        shutil.chown(path, user, group)
+    except (PermissionError, LookupError) as exc:
+        warn("could not chown %s to %s:%s (%s)" % (path, user, group, exc))
+        return
+    if path.is_dir():
+        for child in path.rglob("*"):
+            try:
+                shutil.chown(child, user, group)
+            except (PermissionError, LookupError):
+                pass
+
+
+def relabel(path):
+    """Apply SELinux labels. For standard libvirt dirs restorecon is enough.
+    For a custom dir, register a virt_image_t fcontext rule first."""
+    if not selinux_enabled():
+        return
+    parent = path if path.is_dir() else path.parent
+    if parent not in STANDARD_DIRS and not any(
+        parent == d or d in parent.parents for d in STANDARD_DIRS
+    ):
+        if have("semanage"):
+            run(
+                [
+                    "semanage",
+                    "fcontext",
+                    "-a",
+                    "-t",
+                    "virt_image_t",
+                    "%s(/.*)?" % str(parent),
+                ],
+                check=False,
+            )
+        else:
+            warn(
+                "semanage not found; %s may get the wrong SELinux label. "
+                "Install policycoreutils-python-utils or use a standard dir."
+                % parent
+            )
+    if have("restorecon"):
+        run(["restorecon", "-RF", str(path)], check=False)
+
+
+# ----------------------------------------------------------------------------
+# export
+# ----------------------------------------------------------------------------
+
+def disk_source_path(disk):
+    """Return the host path for a file or block backed disk, else None."""
+    src = disk.find("source")
+    if src is None:
+        return None
+    return src.get("file") or src.get("dev")
+
+
+def backing_chain_len(path):
+    """Number of images in the backing chain (1 == no backing file)."""
+    if not have("qemu-img"):
+        return 1
+    out = run(
+        ["qemu-img", "info", "--backing-chain", "--output=json", str(path)],
+        check=False,
+    )
+    try:
+        return len(json.loads(out))
+    except Exception:
+        return 1
+
+
+def export_vm(name, outdir, flatten=True, overwrite=False):
+    xml = virsh("dumpxml", name)
+    root = ET.fromstring(xml)
+    uuid = root.findtext("uuid")
+    if not uuid:
+        die("could not read UUID for %s" % name)
+
+    bundle = Path(outdir) / name
+    if bundle.exists():
+        if not overwrite:
+            die("%s already exists (use --overwrite)" % bundle)
+        shutil.rmtree(bundle)
+    (bundle / "disks").mkdir(parents=True)
+    (bundle / "nvram").mkdir()
+
+    manifest = {
+        "tool": "virtpacker",
+        "version": VERSION,
+        "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "name": name,
+        "uuid": uuid,
+        "flattened": flatten,
+        "secure_boot": False,
+        "disks": [],
+        "nvram": None,
+        "tpm": None,
+    }
+
+    # --- disks ---------------------------------------------------------------
+    for disk in root.findall("devices/disk"):
+        device = disk.get("device", "disk")
+        target = disk.find("target")
+        dev = target.get("dev") if target is not None else None
+        src = disk.find("source")
+
+        if device == "cdrom":
+            # Drop the ISO reference. Carrying install media in the bundle is
+            # rarely wanted, and a missing ISO path blocks startup.
+            if src is not None:
+                disk.remove(src)
+            continue
+
+        path = disk_source_path(disk)
+        if path is None or dev is None:
+            warn("skipping a disk with no usable source/target")
+            continue
+
+        src_path = Path(path)
+        if not src_path.exists():
+            die("disk source does not exist: %s" % src_path)
+
+        if flatten:
+            dest_name = "%s.qcow2" % dev
+            dest = bundle / "disks" / dest_name
+            print("  flattening %s -> %s" % (src_path, dest_name))
+            run(["qemu-img", "convert", "-O", "qcow2", str(src_path), str(dest)])
+        else:
+            if backing_chain_len(src_path) > 1:
+                die(
+                    "%s has a backing chain. Re-run without --no-flatten, or "
+                    "flatten it manually first." % src_path
+                )
+            dest_name = "%s%s" % (dev, src_path.suffix)
+            dest = bundle / "disks" / dest_name
+            print("  copying %s -> %s" % (src_path, dest_name))
+            shutil.copy2(src_path, dest)
+
+        # Template the path so import can repoint it.
+        src.set("file", "@@disks/%s@@" % dest_name)
+        src.attrib.pop("dev", None)
+        disk.set("type", "file")
+        manifest["disks"].append(
+            {"target": dev, "bundle": "disks/%s" % dest_name, "origin": str(src_path)}
+        )
+
+    # --- firmware / nvram ----------------------------------------------------
+    os_el = root.find("os")
+    nvram_el = os_el.find("nvram") if os_el is not None else None
+    if nvram_el is not None and nvram_el.text:
+        nvram_src = Path(nvram_el.text.strip())
+        loader_el = os_el.find("loader")
+        secure = False
+        if loader_el is not None:
+            if loader_el.get("secure") == "yes":
+                secure = True
+            if loader_el.text and "secboot" in loader_el.text.lower():
+                secure = True
+        manifest["secure_boot"] = secure
+
+        if nvram_src.exists():
+            require_root("exporting nvram")
+            dest_name = nvram_src.name
+            dest = bundle / "nvram" / dest_name
+            print("  copying nvram %s -> %s" % (nvram_src, dest_name))
+            shutil.copy2(nvram_src, dest)
+            manifest["nvram"] = "nvram/%s" % dest_name
+            rewrite_os_firmware(os_el, secure, "@@nvram/%s@@" % dest_name)
+        else:
+            warn("nvram file %s missing; firmware state will be reset on import"
+                 % nvram_src)
+
+    # --- swtpm ---------------------------------------------------------------
+    # The state location is, in order of authority:
+    #   1. an explicit <backend><source .../> path (libvirt >= 10.8.0). This may
+    #      be a single file or a directory depending on the backend form.
+    #   2. otherwise the UUID-derived default dir under the build-time
+    #      localstatedir, conventionally /var/lib/libvirt/swtpm/<uuid>/.
+    # We never assume (1); we read it from the XML and only fall back to (2).
+    tpm = root.find("devices/tpm")
+    if tpm is not None:
+        backend = tpm.find("backend")
+        if backend is not None and backend.get("type") == "emulator":
+            version = backend.get("version", "2.0")
+            source = backend.find("source")
+            explicit = None
+            if source is not None:
+                # Cover every spelling the feature went through: the merged
+                # form is type=/path=, earlier iterations used file=/dir=.
+                explicit = source.get("path") or source.get("file") or source.get("dir")
+
+            if explicit:
+                src = Path(explicit)
+                if src.exists():
+                    require_root("exporting swtpm state")
+                    base = src.name
+                    dest = bundle / "swtpm" / base
+                    dest.parent.mkdir(exist_ok=True)
+                    print("  copying swtpm state (explicit source) %s" % src)
+                    if src.is_dir():
+                        shutil.copytree(src, dest)
+                    else:
+                        shutil.copy2(src, dest)
+                    # The path is in the XML, so template it like any other.
+                    placeholder = "@@swtpm/%s@@" % base
+                    if source.get("path") is not None:
+                        source.set("path", placeholder)
+                    elif source.get("file") is not None:
+                        source.set("file", placeholder)
+                    else:
+                        source.set("dir", placeholder)
+                    manifest["tpm"] = {"version": version, "mode": "explicit",
+                                       "bundle": "swtpm/%s" % base,
+                                       "is_dir": src.is_dir(), "origin": str(src)}
+                else:
+                    warn("TPM source %s not found; TPM state will be "
+                         "reinitialised on import" % src)
+            else:
+                state = SWTPM_BASE / uuid
+                if state.is_dir():
+                    require_root("exporting swtpm state")
+                    dest = bundle / "swtpm"
+                    print("  copying swtpm state %s" % state)
+                    shutil.copytree(state, dest)
+                    manifest["tpm"] = {"version": version, "mode": "uuid-dir"}
+                else:
+                    warn("emulator TPM declared but %s not found; TPM state will "
+                         "be reinitialised on import (breaks anything sealed to "
+                         "it)" % state)
+
+    # --- write ---------------------------------------------------------------
+    template = ET.tostring(root, encoding="unicode")
+    (bundle / "domain.xml.template").write_text(template)
+    (bundle / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    print("exported %s to %s" % (name, bundle))
+
+
+def rewrite_os_firmware(os_el, secure, nvram_placeholder):
+    """Rewrite the <os> block to use firmware autoselection with a carried
+    nvram file. Keeps boot-related children in their original order."""
+    type_el = os_el.find("type")
+    keep = [c for c in list(os_el) if c.tag not in ("type", "loader", "nvram")]
+    for c in list(os_el):
+        os_el.remove(c)
+
+    os_el.set("firmware", "efi")
+    if type_el is not None:
+        os_el.append(type_el)
+    if secure:
+        # Empty loader with secure=yes filters autoselection to a secboot
+        # capable firmware. The carried nvram supplies any enrolled keys.
+        loader = ET.Element("loader")
+        loader.set("secure", "yes")
+        os_el.append(loader)
+    nv = ET.Element("nvram")
+    nv.text = nvram_placeholder
+    os_el.append(nv)
+    for c in keep:
+        os_el.append(c)
+
+
+# ----------------------------------------------------------------------------
+# import
+# ----------------------------------------------------------------------------
+
+def import_bundle(bundle, images_dir, nvram_dir, tpm_dir, owner, start, new_mac):
+    require_root("importing")
+    bundle = Path(bundle)
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    text = (bundle / "domain.xml.template").read_text()
+
+    name = manifest["name"]
+    uuid = manifest["uuid"]
+    tpm = manifest.get("tpm")
+    user, group = owner if owner else detect_owner()
+
+    images_dir = Path(images_dir)
+    nvram_dir = Path(nvram_dir)
+    tpm_dir = Path(tpm_dir)
+    images_dir.mkdir(parents=True, exist_ok=True)
+    nvram_dir.mkdir(parents=True, exist_ok=True)
+
+    # Resolve every @@bundle/relative/path@@ placeholder to a real dest.
+    for placeholder in sorted(set(re.findall(r"@@(.+?)@@", text))):
+        rel = placeholder
+        srcfile = bundle / rel
+        if not srcfile.exists():
+            die("bundle is missing %s referenced by the template" % rel)
+        base = Path(rel).name
+        if rel.startswith("disks/"):
+            dest = images_dir / base
+        elif rel.startswith("nvram/"):
+            dest = nvram_dir / base
+        elif rel.startswith("swtpm/"):
+            dest = tpm_dir / base
+        else:
+            die("unexpected placeholder target: %s" % rel)
+        print("  installing %s -> %s" % (rel, dest))
+        if srcfile.is_dir():
+            if dest.exists():
+                shutil.rmtree(dest)
+            shutil.copytree(srcfile, dest)
+        else:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(srcfile, dest)
+        chown_tree(dest, user, group)
+        relabel(dest)
+        text = text.replace("@@%s@@" % placeholder, str(dest))
+
+    # UUID-derived swtpm dir: not referenced in the XML, so place it explicitly.
+    # The explicit-source case is already handled by the placeholder loop above.
+    if tpm and tpm.get("mode") == "uuid-dir":
+        swtpm_src = bundle / "swtpm"
+        if swtpm_src.is_dir():
+            dest = SWTPM_BASE / uuid
+            print("  installing swtpm state -> %s" % dest)
+            if dest.exists():
+                shutil.rmtree(dest)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(swtpm_src, dest)
+            chown_tree(dest, user, group)
+            relabel(dest)
+
+    if new_mac:
+        # Drop fixed MACs so libvirt regenerates them (avoids collisions on a
+        # shared segment).
+        text = re.sub(r"\s*<mac address='[^']*'\s*/>", "", text)
+
+    tmp = Path("/tmp/virtpacker-%s.xml" % name)
+    tmp.write_text(text)
+    print(virsh("define", str(tmp)).strip())
+    tmp.unlink()
+
+    if start:
+        print(virsh("start", name).strip())
+
+
+# ----------------------------------------------------------------------------
+# cli
+# ----------------------------------------------------------------------------
+
+def cmd_list(args):
+    print(virsh("list", "--all").rstrip())
+
+
+def cmd_export(args):
+    if not have("virsh"):
+        die("virsh not found")
+    if args.all:
+        names = [n for n in virsh("list", "--all", "--name").splitlines() if n.strip()]
+    else:
+        if not args.name:
+            die("give a VM name or use --all")
+        names = [args.name]
+    for name in names:
+        print("exporting %s ..." % name)
+        export_vm(name, args.outdir, flatten=not args.no_flatten,
+                  overwrite=args.overwrite)
+
+
+def cmd_import(args):
+    if not have("virsh"):
+        die("virsh not found")
+    owner = None
+    if args.owner:
+        if ":" in args.owner:
+            u, g = args.owner.split(":", 1)
+        else:
+            u = g = args.owner
+        owner = (u, g)
+    import_bundle(
+        args.bundle,
+        images_dir=args.images_dir,
+        nvram_dir=args.nvram_dir,
+        tpm_dir=args.tpm_dir,
+        owner=owner,
+        start=args.start,
+        new_mac=args.new_mac,
+    )
+
+
+def build_parser():
+    p = argparse.ArgumentParser(
+        prog="virtpacker",
+        description="Export and import libvirt VMs as portable bundles.",
+    )
+    p.add_argument("--version", action="version", version="virtpacker " + VERSION)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    pl = sub.add_parser("list", help="list domains libvirt knows about")
+    pl.set_defaults(func=cmd_list)
+
+    pe = sub.add_parser("export", help="export one VM or all of them")
+    pe.add_argument("name", nargs="?", help="VM name (omit with --all)")
+    pe.add_argument("-o", "--outdir", default=".", help="where to write bundles")
+    pe.add_argument("--all", action="store_true", help="export every domain")
+    pe.add_argument("--no-flatten", action="store_true",
+                    help="copy disks as-is; refuse if a backing chain exists")
+    pe.add_argument("--overwrite", action="store_true",
+                    help="replace an existing bundle dir")
+    pe.set_defaults(func=cmd_export)
+
+    pi = sub.add_parser("import", help="import a bundle on this host")
+    pi.add_argument("bundle", help="path to the bundle directory")
+    pi.add_argument("--images-dir", default=str(DEFAULT_IMAGES_DIR),
+                    help="destination for disk images")
+    pi.add_argument("--nvram-dir", default=str(DEFAULT_NVRAM_DIR),
+                    help="destination for the nvram var store")
+    pi.add_argument("--tpm-dir", default=str(SWTPM_BASE),
+                    help="destination dir for an explicit-source swtpm file "
+                         "(uuid-dir TPM state always goes to its UUID path)")
+    pi.add_argument("--owner", help="qemu user[:group] (default auto-detect)")
+    pi.add_argument("--new-mac", action="store_true",
+                    help="strip fixed MACs so libvirt regenerates them")
+    pi.add_argument("--start", action="store_true", help="start the VM after define")
+    pi.set_defaults(func=cmd_import)
+
+    return p
+
+
+def main():
+    args = build_parser().parse_args()
+    try:
+        args.func(args)
+    except RuntimeError as exc:
+        die(str(exc))
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,15 @@
+virtpacker (0.2.0) unstable; urgency=medium
+
+  * Initial release.
+  * export and import libvirt domains as portable single-directory bundles.
+  * disks copied and flattened to standalone qcow2 by default, with
+    --no-flatten available (refuses rather than mishandling a backing chain).
+  * nvram carried in the bundle; on import the domain switches to UEFI
+    firmware autoselection so the host picks its own OVMF or edk2 build.
+  * swtpm TPM state handled in two modes: an explicit <backend><source>
+    path is read from the domain XML when present (libvirt 10.8 and later),
+    otherwise the UUID-derived default directory is used.
+  * SELinux contexts restored on import via restorecon, with a semanage
+    fcontext rule added for non-standard destination directories.
+
+ -- Bill Prochazka <bprochazka@verostech.com>  Wed, 03 Jun 2026 12:00:00 +0000
