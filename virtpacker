@@ -25,7 +25,7 @@ Caveats worth knowing:
   - The qemu user differs by distro (libvirt-qemu on Debian, qemu on RHEL).
     It is auto-detected but can be overridden with --owner.
 
-Version 0.3.1
+Version 0.3.2
 """
 
 import argparse
@@ -40,7 +40,7 @@ import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 QEMU_NS = "http://libvirt.org/schemas/domain/qemu/1.0"
 ET.register_namespace("qemu", QEMU_NS)
 
@@ -401,6 +401,13 @@ def export_vm(name, outdir, flatten=True, overwrite=False, space_check=True):
         src.set("file", "@@disks/%s@@" % dest_name)
         src.attrib.pop("dev", None)
         disk.set("type", "file")
+        # The flattened (or verified single) image is standalone, so drop any
+        # <backingStore> the source carried. Left in place it points the
+        # imported domain at a host backing path that is not in the bundle and
+        # does not exist on the destination, and libvirt refuses to start the
+        # VM. libvirt repopulates this element from the real image on define.
+        for bs in disk.findall("backingStore"):
+            disk.remove(bs)
         manifest["disks"].append(
             {"target": dev, "bundle": "disks/%s" % dest_name, "origin": str(src_path)}
         )

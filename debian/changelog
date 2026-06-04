@@ -1,3 +1,15 @@
+virtpacker (0.3.2) unstable; urgency=medium
+
+  * Strip <backingStore> from disks on export. Flattening collapses the image
+    to a standalone qcow2, but the stale <backingStore> element was left in the
+    domain XML, so the imported domain still referenced the source's backing
+    file (e.g. /var/lib/libvirt/images/win11ltsc.qcow2). That path is not in
+    the bundle and does not exist on the destination, so libvirt refused to
+    start the VM. libvirt repopulates the element from the real image on
+    define.
+
+ -- Bill Prochazka <bprochazka@verostech.com>  Thu, 04 Jun 2026 14:00:00 +0000
+
 virtpacker (0.3.1) unstable; urgency=medium
 
   * Fix machine type aliasing (and --new-mac) silently doing nothing: the
