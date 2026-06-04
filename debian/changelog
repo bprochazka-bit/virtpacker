@@ -1,3 +1,14 @@
+virtpacker (0.3.1) unstable; urgency=medium
+
+  * Fix machine type aliasing (and --new-mac) silently doing nothing: the
+    domain XML template is serialized with double-quoted attributes, but the
+    regexes only matched single quotes. Both now match either quote style, so
+    a versioned machine type is correctly aliased on import. This also covers
+    bundles exported by 0.2.0, since sanitizing happens at import time on the
+    template, independent of the exporting version.
+
+ -- Bill Prochazka <bprochazka@verostech.com>  Thu, 04 Jun 2026 13:00:00 +0000
+
 virtpacker (0.3.0) unstable; urgency=medium
 
   * Sparse-aware disk copies. --no-flatten and the import step now copy disk

@@ -65,7 +65,7 @@ they read from and write to `/var/lib/libvirt`.
 ### From the Debian package
 
 ```
-sudo apt install ./virtpacker_0.3.0_all.deb
+sudo apt install ./virtpacker_0.3.1_all.deb
 ```
 
 This installs `/usr/bin/virtpacker` and its man page. See "Building the package"
@@ -208,7 +208,7 @@ sudo apt build-dep .
 dpkg-buildpackage -us -uc -b
 ```
 
-The resulting `virtpacker_0.3.0_all.deb` is written to the parent directory. The
+The resulting `virtpacker_0.3.1_all.deb` is written to the parent directory. The
 package is a native Debian package (`3.0 (native)`), so there is no separate
 upstream tarball to manage.
 

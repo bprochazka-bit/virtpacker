@@ -25,7 +25,7 @@ Caveats worth knowing:
   - The qemu user differs by distro (libvirt-qemu on Debian, qemu on RHEL).
     It is auto-detected but can be overridden with --owner.
 
-Version 0.3.0
+Version 0.3.1
 """
 
 import argparse
@@ -40,7 +40,7 @@ import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 QEMU_NS = "http://libvirt.org/schemas/domain/qemu/1.0"
 ET.register_namespace("qemu", QEMU_NS)
 
@@ -626,8 +626,8 @@ def import_bundle(bundle, images_dir, nvram_dir, tpm_dir, owner, start, new_mac,
 
     if new_mac:
         # Drop fixed MACs so libvirt regenerates them (avoids collisions on a
-        # shared segment).
-        text = re.sub(r"\s*<mac address='[^']*'\s*/>", "", text)
+        # shared segment). The attribute may be single- or double-quoted.
+        text = re.sub(r'\s*<mac address=(["\'])[^"\']*\1\s*/>', "", text)
 
     # Machine type portability. The bundle records the source host's exact
     # versioned machine type (e.g. pc-q35-10.0); an older QEMU on the
@@ -635,10 +635,11 @@ def import_bundle(bundle, images_dir, nvram_dir, tpm_dir, owner, start, new_mac,
     # default is to let the destination choose: a versioned type is rewritten
     # to its generic alias (q35 / pc), which resolves to the newest version the
     # local QEMU supports. --machine forces an explicit value; --keep-machine
-    # preserves the bundle's type verbatim.
-    mobj = re.search(r"(<type\b[^>]*\bmachine=')([^']*)(')", text)
+    # preserves the bundle's type verbatim. The attribute may be single- or
+    # double-quoted (ElementTree serializes with double quotes), so match both.
+    mobj = re.search(r'(<type\b[^>]*\bmachine=)(["\'])([^"\']*)\2', text)
     if mobj:
-        current = mobj.group(2)
+        current = mobj.group(3)
         new = None
         if machine:
             new = machine
@@ -646,7 +647,7 @@ def import_bundle(bundle, images_dir, nvram_dir, tpm_dir, owner, start, new_mac,
             new = portable_machine(current)
         if new and new != current:
             print("  machine type: %s -> %s" % (current, new))
-            text = text[:mobj.start(2)] + new + text[mobj.end(2):]
+            text = text[:mobj.start(3)] + new + text[mobj.end(3):]
     elif machine:
         warn("no <type machine=...> in the domain XML; --machine ignored")
 
