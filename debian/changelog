@@ -8,6 +8,11 @@ virtpacker (0.3.0) unstable; urgency=medium
   * Free-space preflight before export and import: the destination filesystem
     is checked against the estimated on-disk bytes (with a small margin) and
     the run aborts early if short. Bypass with --no-space-check.
+  * Machine type portability. On import a versioned QEMU machine type
+    (e.g. pc-q35-10.0) is aliased to its generic form (q35 / pc) so an older
+    QEMU on the destination can resolve a supported version, mirroring how
+    firmware is already handled. Override with --machine, or preserve the
+    bundle's exact type with --keep-machine.
 
  -- Bill Prochazka <bprochazka@verostech.com>  Thu, 04 Jun 2026 12:00:00 +0000
 

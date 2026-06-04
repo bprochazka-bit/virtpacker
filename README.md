@@ -136,6 +136,9 @@ sudo virtpacker import /tank/bundles/winvm --new-mac
   UUID path
 - `--owner USER[:GROUP]` ownership for installed files (auto-detected otherwise)
 - `--new-mac` strip fixed MACs so libvirt regenerates them
+- `--machine MACHINE` set the machine type (e.g. `q35`); by default a versioned
+  type is aliased so the host picks a supported version
+- `--keep-machine` keep the bundle's exact machine type instead of aliasing it
 - `--start` start the domain after defining it
 - `--no-space-check` skip the destination free-space preflight
 
@@ -177,6 +180,11 @@ defined.
 - **CPU model.** If the source domain uses `host-passthrough` and the destination
   CPU differs, the guest may not boot. Switch the imported domain to `host-model`
   or a named model in that case.
+- **Machine type.** The source records an exact versioned machine type (e.g.
+  `pc-q35-10.0`). An older QEMU on the destination will reject a version it does
+  not ship, so on import a versioned type is aliased to its generic form (`q35`
+  or `pc`) and the host resolves a supported version. Use `--machine` to pin a
+  specific type or `--keep-machine` to preserve the original verbatim.
 - **Block-backed disks** are read through `qemu-img` and land as qcow2 files in
   the bundle, which is the intended portable behavior.
 

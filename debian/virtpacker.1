@@ -26,6 +26,9 @@ virtpacker \- export and import libvirt virtual machines as portable bundles
 .RB [ \-\-owner
 .IR USER[:GROUP] ]
 .RB [ \-\-new\-mac ]
+.RB [ \-\-machine
+.IR MACHINE ]
+.RB [ \-\-keep\-machine ]
 .RB [ \-\-start ]
 .RB [ \-\-no\-space\-check ]
 .I BUNDLE
@@ -48,7 +51,8 @@ UUID-derived default directory.
 On import, files are written into the host's standard libvirt directories,
 the templated paths are rewritten to their destinations, swtpm state is
 placed where the domain expects it, SELinux labels are restored, and the
-domain is defined.
+domain is defined. A versioned machine type is aliased to its generic form
+so the destination host's QEMU can supply a supported version.
 .SH COMMANDS
 .TP
 .B list
@@ -102,6 +106,14 @@ when not given.
 .B \-\-new\-mac
 Strip fixed MAC addresses so libvirt regenerates them, avoiding collisions
 on a shared segment.
+.TP
+.B \-\-machine " " \fIMACHINE\fR
+Set the machine type for the imported domain. By default a versioned machine
+type (such as pc-q35-10.0) is rewritten to its generic alias (q35 or pc) so
+the destination host's QEMU resolves a version it supports.
+.TP
+.B \-\-keep\-machine
+Keep the bundle's exact machine type instead of aliasing it.
 .TP
 .B \-\-start
 Start the domain after defining it.

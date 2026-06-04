@@ -507,8 +507,21 @@ def rewrite_os_firmware(os_el, secure, nvram_placeholder):
 # import
 # ----------------------------------------------------------------------------
 
+def portable_machine(machine):
+    """Map a versioned QEMU machine type to its generic alias so the
+    destination host can resolve it to a version its QEMU actually ships.
+
+    pc-q35-10.0 -> q35, pc-i440fx-8.2 -> pc. Returns None when the type is
+    already an alias or is one we should leave alone.
+    """
+    m = re.match(r"pc-(q35|i440fx)-[0-9.]+$", machine)
+    if not m:
+        return None
+    return "q35" if m.group(1) == "q35" else "pc"
+
+
 def import_bundle(bundle, images_dir, nvram_dir, tpm_dir, owner, start, new_mac,
-                  space_check=True):
+                  space_check=True, machine=None, keep_machine=False):
     require_root("importing")
     bundle = Path(bundle)
     manifest = json.loads((bundle / "manifest.json").read_text())
@@ -586,6 +599,27 @@ def import_bundle(bundle, images_dir, nvram_dir, tpm_dir, owner, start, new_mac,
         # Drop fixed MACs so libvirt regenerates them (avoids collisions on a
         # shared segment).
         text = re.sub(r"\s*<mac address='[^']*'\s*/>", "", text)
+
+    # Machine type portability. The bundle records the source host's exact
+    # versioned machine type (e.g. pc-q35-10.0); an older QEMU on the
+    # destination rejects a version it does not ship. As with firmware, the
+    # default is to let the destination choose: a versioned type is rewritten
+    # to its generic alias (q35 / pc), which resolves to the newest version the
+    # local QEMU supports. --machine forces an explicit value; --keep-machine
+    # preserves the bundle's type verbatim.
+    mobj = re.search(r"(<type\b[^>]*\bmachine=')([^']*)(')", text)
+    if mobj:
+        current = mobj.group(2)
+        new = None
+        if machine:
+            new = machine
+        elif not keep_machine:
+            new = portable_machine(current)
+        if new and new != current:
+            print("  machine type: %s -> %s" % (current, new))
+            text = text[:mobj.start(2)] + new + text[mobj.end(2):]
+    elif machine:
+        warn("no <type machine=...> in the domain XML; --machine ignored")
 
     tmp = Path("/tmp/virtpacker-%s.xml" % name)
     tmp.write_text(text)
@@ -666,6 +700,8 @@ def cmd_import(args):
         start=args.start,
         new_mac=args.new_mac,
         space_check=not args.no_space_check,
+        machine=args.machine,
+        keep_machine=args.keep_machine,
     )
 
 
@@ -704,6 +740,13 @@ def build_parser():
     pi.add_argument("--owner", help="qemu user[:group] (default auto-detect)")
     pi.add_argument("--new-mac", action="store_true",
                     help="strip fixed MACs so libvirt regenerates them")
+    pi.add_argument("--machine",
+                    help="set the machine type (e.g. q35); by default a "
+                         "versioned type is aliased so the host picks a "
+                         "supported version")
+    pi.add_argument("--keep-machine", action="store_true",
+                    help="keep the bundle's exact machine type instead of "
+                         "aliasing it")
     pi.add_argument("--start", action="store_true", help="start the VM after define")
     pi.add_argument("--no-space-check", action="store_true",
                     help="skip the destination free-space preflight")
