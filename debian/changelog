@@ -1,3 +1,15 @@
+virtpacker (0.3.3) unstable; urgency=medium
+
+  * Name exported disks <vm>-<dev> (e.g. win11ltsc-sda.qcow2) instead of a
+    bare <dev> (sda.qcow2), so images are unique per VM in a shared images
+    directory rather than colliding across domains.
+  * On import, never overwrite an existing disk image: if the destination is
+    already taken, the disk is copied under a unique name (a short random
+    token appended) and the domain XML is updated to match. --no-overwrite-disks
+    still reuses an existing image instead (for resuming a failed import).
+
+ -- Bill Prochazka <bprochazka@verostech.com>  Thu, 04 Jun 2026 15:00:00 +0000
+
 virtpacker (0.3.2) unstable; urgency=medium
 
   * Strip <backingStore> from disks on export. Flattening collapses the image

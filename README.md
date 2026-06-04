@@ -65,7 +65,7 @@ they read from and write to `/var/lib/libvirt`.
 ### From the Debian package
 
 ```
-sudo apt install ./virtpacker_0.3.2_all.deb
+sudo apt install ./virtpacker_0.3.3_all.deb
 ```
 
 This installs `/usr/bin/virtpacker` and its man page. See "Building the package"
@@ -113,9 +113,12 @@ short, rather than failing partway through a large copy. Pass `--no-space-check`
 to skip it.
 
 Disk copies are atomic (written to a temp file and renamed into place), so an
-interrupted import never leaves a truncated image. If an import copies the disks
-but then fails at the define step, re-run it with `--no-overwrite-disks` to reuse
-the already-copied images instead of copying them again:
+interrupted import never leaves a truncated image. An existing disk image at the
+destination is never overwritten: if the name is already taken, the incoming disk
+is copied under a unique name (a short random token is appended) and the domain
+XML is updated to point at it. To instead reuse an already-present image — for
+example to resume an import that copied the disks but failed at the define
+step — pass `--no-overwrite-disks`:
 
 ```
 sudo virtpacker import /tank/bundles/winvm --no-overwrite-disks
@@ -148,8 +151,8 @@ sudo virtpacker import /tank/bundles/winvm --new-mac
 - `--machine MACHINE` set the machine type (e.g. `q35`); by default a versioned
   type is aliased so the host picks a supported version
 - `--keep-machine` keep the bundle's exact machine type instead of aliasing it
-- `--no-overwrite-disks` skip copying a disk whose destination already exists
-  (reuse images from a previous run instead of re-copying)
+- `--no-overwrite-disks` reuse a disk whose destination already exists instead
+  of importing a fresh copy under a unique name (e.g. to resume a failed import)
 - `--start` start the domain after defining it
 - `--no-space-check` skip the destination free-space preflight
 
@@ -160,7 +163,7 @@ winvm/
   manifest.json         name, uuid, secure_boot flag, disk/nvram/tpm inventory
   domain.xml.template   domain XML with paths replaced by @@bundle/relative@@
   disks/
-    vda.qcow2
+    winvm-vda.qcow2
   nvram/
     winvm_VARS.fd
   swtpm/                directory, or a single file for an explicit source
@@ -208,7 +211,7 @@ sudo apt build-dep .
 dpkg-buildpackage -us -uc -b
 ```
 
-The resulting `virtpacker_0.3.2_all.deb` is written to the parent directory. The
+The resulting `virtpacker_0.3.3_all.deb` is written to the parent directory. The
 package is a native Debian package (`3.0 (native)`), so there is no separate
 upstream tarball to manage.
 

@@ -1,4 +1,4 @@
-.TH VIRTPACKER 1 "June 2026" "virtpacker 0.3.2" "User Commands"
+.TH VIRTPACKER 1 "June 2026" "virtpacker 0.3.3" "User Commands"
 .SH NAME
 virtpacker \- export and import libvirt virtual machines as portable bundles
 .SH SYNOPSIS
@@ -53,7 +53,9 @@ On import, files are written into the host's standard libvirt directories,
 the templated paths are rewritten to their destinations, swtpm state is
 placed where the domain expects it, SELinux labels are restored, and the
 domain is defined. A versioned machine type is aliased to its generic form
-so the destination host's QEMU can supply a supported version.
+so the destination host's QEMU can supply a supported version. An existing
+disk image at the destination is never overwritten: the incoming disk is
+copied under a unique name and the domain XML is updated to match.
 .SH COMMANDS
 .TP
 .B list
@@ -117,10 +119,12 @@ the destination host's QEMU resolves a version it supports.
 Keep the bundle's exact machine type instead of aliasing it.
 .TP
 .B \-\-no\-overwrite\-disks
-Skip copying any disk whose destination file already exists, reusing the
-images from a previous run instead of copying them again. Useful when a prior
-import copied the disks but failed at the define step. Disk copies are atomic,
-so an existing destination is always a complete image.
+Reuse a disk whose destination file already exists instead of importing a
+fresh copy under a unique name. Useful for resuming when a prior import copied
+the disks but failed at the define step. Disk copies are atomic, so an existing
+destination is always a complete image. Without this flag, a collision never
+overwrites the existing image; the incoming disk is copied under a unique name
+and the XML is updated to match.
 .TP
 .B \-\-start
 Start the domain after defining it.

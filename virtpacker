@@ -25,7 +25,7 @@ Caveats worth knowing:
   - The qemu user differs by distro (libvirt-qemu on Debian, qemu on RHEL).
     It is auto-detected but can be overridden with --owner.
 
-Version 0.3.2
+Version 0.3.3
 """
 
 import argparse
@@ -33,6 +33,7 @@ import json
 import os
 import pwd
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -40,7 +41,7 @@ import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-VERSION = "0.3.2"
+VERSION = "0.3.3"
 QEMU_NS = "http://libvirt.org/schemas/domain/qemu/1.0"
 ET.register_namespace("qemu", QEMU_NS)
 
@@ -229,6 +230,18 @@ def copy_sparse(src, dest):
         raise
 
 
+def unique_path(path):
+    """Return a path that does not exist, inserting a short random token before
+    the suffix. Used to avoid clobbering an existing file on import."""
+    path = Path(path)
+    for _ in range(1000):
+        token = secrets.token_hex(3)
+        cand = path.with_name("%s-%s%s" % (path.stem, token, path.suffix))
+        if not cand.exists():
+            return cand
+    raise RuntimeError("could not find a free name near %s" % path)
+
+
 def fs_anchor(path):
     """Nearest existing ancestor of path, used to find which filesystem it is
     on and how much space is free there (the dir may not exist yet)."""
@@ -278,6 +291,12 @@ def check_space(needs, skip=False):
 # ----------------------------------------------------------------------------
 # export
 # ----------------------------------------------------------------------------
+
+def safe_name(name):
+    """Sanitize a domain name for use as a filename component."""
+    cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", name).strip("._")
+    return cleaned or "disk"
+
 
 def disk_source_path(disk):
     """Return the host path for a file or block backed disk, else None."""
@@ -381,8 +400,11 @@ def export_vm(name, outdir, flatten=True, overwrite=False, space_check=True):
         if not src_path.exists():
             die("disk source does not exist: %s" % src_path)
 
+        # Name disks <vm>-<dev> so they are unique per VM in a shared images
+        # dir; a bare <dev> name (sda.qcow2) collides across domains and, with
+        # --no-overwrite-disks on import, would silently adopt another VM's disk.
         if flatten:
-            dest_name = "%s.qcow2" % dev
+            dest_name = "%s-%s.qcow2" % (safe_name(name), dev)
             dest = bundle / "disks" / dest_name
             print("  flattening %s -> %s" % (src_path, dest_name))
             run(["qemu-img", "convert", "-O", "qcow2", str(src_path), str(dest)])
@@ -392,7 +414,7 @@ def export_vm(name, outdir, flatten=True, overwrite=False, space_check=True):
                     "%s has a backing chain. Re-run without --no-flatten, or "
                     "flatten it manually first." % src_path
                 )
-            dest_name = "%s%s" % (dev, src_path.suffix)
+            dest_name = "%s-%s%s" % (safe_name(name), dev, src_path.suffix)
             dest = bundle / "disks" / dest_name
             print("  copying %s -> %s (sparse-aware)" % (src_path, dest_name))
             copy_sparse(src_path, dest)
@@ -598,11 +620,19 @@ def import_bundle(bundle, images_dir, nvram_dir, tpm_dir, owner, start, new_mac,
             dest = tpm_dir / base
         else:
             die("unexpected placeholder target: %s" % rel)
-        keep = (no_overwrite_disks and rel.startswith("disks/")
-                and srcfile.is_file() and dest.exists())
+        is_disk = rel.startswith("disks/") and srcfile.is_file()
+        keep = is_disk and no_overwrite_disks and dest.exists()
         if keep:
             print("  keeping existing %s (--no-overwrite-disks)" % dest)
         else:
+            # Never clobber an existing disk image. If the destination is
+            # taken (a different VM, or a re-import), copy under a unique name
+            # and let the XML follow via the path substitution below.
+            if is_disk and dest.exists():
+                newdest = unique_path(dest)
+                warn("%s already exists; importing as %s instead"
+                     % (dest, newdest.name))
+                dest = newdest
             print("  installing %s -> %s" % (rel, dest))
             if srcfile.is_dir():
                 if dest.exists():
