@@ -22,6 +22,8 @@ entries, enrolled Secure Boot keys, or TPM-sealed data.
   standalone qcow2 with `qemu-img convert`, which collapses backing chains and
   produces a self-contained image. `--no-flatten` copies the disk as-is and
   refuses if it detects a backing chain, rather than producing a broken bundle.
+  Copies are sparse-aware (via `cp --sparse=always --reflink=auto`), so holes in
+  a sparse image are preserved instead of being written out as real zeroes.
 - **nvram.** The UEFI variable store is copied into the bundle and its path is
   templated. This file holds the boot order and any enrolled Secure Boot keys.
 - **UEFI firmware (loader).** Not copied. The read-only OVMF or edk2 firmware is
@@ -63,7 +65,7 @@ they read from and write to `/var/lib/libvirt`.
 ### From the Debian package
 
 ```
-sudo apt install ./virtpacker_0.2.0_all.deb
+sudo apt install ./virtpacker_0.3.0_all.deb
 ```
 
 This installs `/usr/bin/virtpacker` and its man page. See "Building the package"
@@ -80,11 +82,16 @@ sudo ./virtpacker export winvm -o /tank/bundles
 
 ## Usage
 
-List the domains libvirt knows about:
+List the domains libvirt knows about, with each domain's state and disk usage
+(size on disk versus apparent size):
 
 ```
 virtpacker list
 ```
+
+The "On disk" column is the actual allocation (it honors sparseness), while
+"Apparent" is the nominal file length; the gap between them is the space a
+sparse image is saving.
 
 Export one domain, or all of them:
 
@@ -100,6 +107,11 @@ sudo virtpacker import /tank/bundles/winvm
 sudo virtpacker import /tank/bundles/winvm --start
 ```
 
+Both export and import run a free-space preflight first: they estimate the
+on-disk bytes (sparse-aware) and abort early if the destination filesystem is
+short, rather than failing partway through a large copy. Pass `--no-space-check`
+to skip it.
+
 On a host that shares a network segment with the source, regenerate the MAC to
 avoid a collision:
 
@@ -113,6 +125,7 @@ sudo virtpacker import /tank/bundles/winvm --new-mac
 - `--all` export every defined domain
 - `--no-flatten` copy disks as-is, refuse on a backing chain
 - `--overwrite` replace an existing bundle directory
+- `--no-space-check` skip the destination free-space preflight
 
 ### Import options
 
@@ -124,6 +137,7 @@ sudo virtpacker import /tank/bundles/winvm --new-mac
 - `--owner USER[:GROUP]` ownership for installed files (auto-detected otherwise)
 - `--new-mac` strip fixed MACs so libvirt regenerates them
 - `--start` start the domain after defining it
+- `--no-space-check` skip the destination free-space preflight
 
 ## Bundle layout
 
@@ -175,7 +189,7 @@ sudo apt build-dep .
 dpkg-buildpackage -us -uc -b
 ```
 
-The resulting `virtpacker_0.2.0_all.deb` is written to the parent directory. The
+The resulting `virtpacker_0.3.0_all.deb` is written to the parent directory. The
 package is a native Debian package (`3.0 (native)`), so there is no separate
 upstream tarball to manage.
 

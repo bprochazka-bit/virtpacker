@@ -8,7 +8,7 @@ swtpm state directory. The aim is VMware-style portability: copy the
 directory to another host and import it.
 
 What gets handled:
-  disks    copied (and by default flattened to standalone qcow2)
+  disks    copied sparse-aware (and by default flattened to standalone qcow2)
   nvram    copied into the bundle, path templated
   loader   not copied. On import the VM uses firmware autoselection so the
            host picks its own OVMF/edk2 build (portable across distros)
@@ -25,7 +25,7 @@ Caveats worth knowing:
   - The qemu user differs by distro (libvirt-qemu on Debian, qemu on RHEL).
     It is auto-detected but can be overridden with --owner.
 
-Version 0.2.0
+Version 0.3.0
 """
 
 import argparse
@@ -40,7 +40,7 @@ import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 QEMU_NS = "http://libvirt.org/schemas/domain/qemu/1.0"
 ET.register_namespace("qemu", QEMU_NS)
 
@@ -161,6 +161,104 @@ def relabel(path):
 
 
 # ----------------------------------------------------------------------------
+# size and space accounting
+# ----------------------------------------------------------------------------
+
+def human(n):
+    """Format a byte count with binary units."""
+    n = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB", "PiB"):
+        if abs(n) < 1024 or unit == "PiB":
+            return "%d B" % n if unit == "B" else "%.1f %s" % (n, unit)
+        n /= 1024
+
+
+def on_disk_bytes(path):
+    """Actual space a file or tree occupies, honoring sparse holes.
+
+    st_blocks counts 512-byte units regardless of the filesystem block size,
+    so this reflects real allocation rather than the apparent (st_size) length.
+    A sparse image reads back far smaller here than its nominal size.
+    """
+    path = Path(path)
+    try:
+        if path.is_dir():
+            total = 0
+            for child in path.rglob("*"):
+                try:
+                    total += child.stat().st_blocks * 512
+                except OSError:
+                    pass
+            return total
+        return path.stat().st_blocks * 512
+    except OSError:
+        return 0
+
+
+def copy_sparse(src, dest):
+    """Copy a single file while preserving sparseness.
+
+    shutil.copy2 streams every byte, so holes in a sparse image are written
+    out as real zeroes and the copy balloons to its apparent size. GNU cp can
+    detect zero runs (--sparse=always) and reflink on copy-on-write
+    filesystems, keeping the copy as small as the original (or smaller). Fall
+    back to shutil.copy2 only when cp is unavailable.
+    """
+    if have("cp"):
+        run(["cp", "--reflink=auto", "--sparse=always",
+             "--preserve=mode,timestamps", str(src), str(dest)], capture=False)
+    else:
+        warn("cp not found; falling back to a non-sparse copy of %s" % src)
+        shutil.copy2(src, dest)
+
+
+def fs_anchor(path):
+    """Nearest existing ancestor of path, used to find which filesystem it is
+    on and how much space is free there (the dir may not exist yet)."""
+    p = Path(path).resolve()
+    while not p.exists():
+        if p.parent == p:
+            break
+        p = p.parent
+    return p
+
+
+SPACE_MARGIN = 0.05  # headroom over the estimate for metadata and rounding
+
+
+def check_space(needs, skip=False):
+    """Verify each destination has room for what we are about to write.
+
+    needs maps a destination directory to the bytes we expect to write there.
+    Destinations on the same filesystem are summed so we neither under-count
+    (two large writes to one fs) nor double-count (sibling dirs that share a
+    fs). Dies if any filesystem comes up short.
+    """
+    if skip:
+        return
+    by_fs = {}
+    for dest, want in needs.items():
+        if want <= 0:
+            continue
+        anchor = fs_anchor(dest)
+        dev = anchor.stat().st_dev
+        entry = by_fs.setdefault(dev, {"anchor": anchor, "want": 0, "dests": []})
+        entry["want"] += want
+        entry["dests"].append(str(dest))
+    for entry in by_fs.values():
+        want = entry["want"]
+        padded = int(want * (1 + SPACE_MARGIN))
+        free = shutil.disk_usage(entry["anchor"]).free
+        where = ", ".join(entry["dests"])
+        if padded > free:
+            die("not enough space for %s: need ~%s, only %s free "
+                "(use --no-space-check to override)"
+                % (where, human(padded), human(free)))
+        print("  space check ok for %s: need ~%s, %s free"
+              % (where, human(want), human(free)))
+
+
+# ----------------------------------------------------------------------------
 # export
 # ----------------------------------------------------------------------------
 
@@ -170,6 +268,23 @@ def disk_source_path(disk):
     if src is None:
         return None
     return src.get("file") or src.get("dev")
+
+
+def domain_disks(name):
+    """Yield (target_dev, source_path) for the non-cdrom disks of a domain."""
+    try:
+        root = ET.fromstring(virsh("dumpxml", name))
+    except (RuntimeError, ET.ParseError):
+        return
+    for disk in root.findall("devices/disk"):
+        if disk.get("device") == "cdrom":
+            continue
+        path = disk_source_path(disk)
+        if not path:
+            continue
+        target = disk.find("target")
+        dev = target.get("dev") if target is not None else "?"
+        yield dev, path
 
 
 def backing_chain_len(path):
@@ -186,12 +301,24 @@ def backing_chain_len(path):
         return 1
 
 
-def export_vm(name, outdir, flatten=True, overwrite=False):
+def export_vm(name, outdir, flatten=True, overwrite=False, space_check=True):
     xml = virsh("dumpxml", name)
     root = ET.fromstring(xml)
     uuid = root.findtext("uuid")
     if not uuid:
         die("could not read UUID for %s" % name)
+
+    # Preflight: estimate disk bytes (sparse-aware) and confirm the output
+    # filesystem has room before we start copying. Both flatten (qemu-img only
+    # writes allocated clusters) and the sparse copy stay close to on-disk size.
+    est = 0
+    for disk in root.findall("devices/disk"):
+        if disk.get("device") == "cdrom":
+            continue
+        path = disk_source_path(disk)
+        if path and Path(path).is_file():
+            est += on_disk_bytes(path)
+    check_space({Path(outdir): est}, skip=not space_check)
 
     bundle = Path(outdir) / name
     if bundle.exists():
@@ -250,8 +377,8 @@ def export_vm(name, outdir, flatten=True, overwrite=False):
                 )
             dest_name = "%s%s" % (dev, src_path.suffix)
             dest = bundle / "disks" / dest_name
-            print("  copying %s -> %s" % (src_path, dest_name))
-            shutil.copy2(src_path, dest)
+            print("  copying %s -> %s (sparse-aware)" % (src_path, dest_name))
+            copy_sparse(src_path, dest)
 
         # Template the path so import can repoint it.
         src.set("file", "@@disks/%s@@" % dest_name)
@@ -380,7 +507,8 @@ def rewrite_os_firmware(os_el, secure, nvram_placeholder):
 # import
 # ----------------------------------------------------------------------------
 
-def import_bundle(bundle, images_dir, nvram_dir, tpm_dir, owner, start, new_mac):
+def import_bundle(bundle, images_dir, nvram_dir, tpm_dir, owner, start, new_mac,
+                  space_check=True):
     require_root("importing")
     bundle = Path(bundle)
     manifest = json.loads((bundle / "manifest.json").read_text())
@@ -394,6 +522,22 @@ def import_bundle(bundle, images_dir, nvram_dir, tpm_dir, owner, start, new_mac)
     images_dir = Path(images_dir)
     nvram_dir = Path(nvram_dir)
     tpm_dir = Path(tpm_dir)
+
+    # Preflight: estimate on-disk bytes per destination and confirm space
+    # before writing anything. Grouped by filesystem inside check_space.
+    needs = {}
+    disks_b = bundle / "disks"
+    if disks_b.is_dir():
+        needs[images_dir] = needs.get(images_dir, 0) + on_disk_bytes(disks_b)
+    nvram_b = bundle / "nvram"
+    if nvram_b.is_dir():
+        needs[nvram_dir] = needs.get(nvram_dir, 0) + on_disk_bytes(nvram_b)
+    swtpm_b = bundle / "swtpm"
+    if swtpm_b.is_dir():
+        tpm_dest = SWTPM_BASE if (tpm and tpm.get("mode") == "uuid-dir") else tpm_dir
+        needs[tpm_dest] = needs.get(tpm_dest, 0) + on_disk_bytes(swtpm_b)
+    check_space(needs, skip=not space_check)
+
     images_dir.mkdir(parents=True, exist_ok=True)
     nvram_dir.mkdir(parents=True, exist_ok=True)
 
@@ -419,7 +563,7 @@ def import_bundle(bundle, images_dir, nvram_dir, tpm_dir, owner, start, new_mac)
             shutil.copytree(srcfile, dest)
         else:
             dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(srcfile, dest)
+            copy_sparse(srcfile, dest)
         chown_tree(dest, user, group)
         relabel(dest)
         text = text.replace("@@%s@@" % placeholder, str(dest))
@@ -457,7 +601,35 @@ def import_bundle(bundle, images_dir, nvram_dir, tpm_dir, owner, start, new_mac)
 # ----------------------------------------------------------------------------
 
 def cmd_list(args):
-    print(virsh("list", "--all").rstrip())
+    if not have("virsh"):
+        die("virsh not found")
+    names = [n for n in virsh("list", "--all", "--name").splitlines() if n.strip()]
+    rows = []
+    total = 0
+    for name in names:
+        state = virsh("domstate", name, check=False).strip() or "unknown"
+        on_disk = apparent = 0
+        for _dev, path in domain_disks(name):
+            p = Path(path)
+            if p.is_file():
+                st = p.stat()
+                on_disk += st.st_blocks * 512
+                apparent += st.st_size
+        total += on_disk
+        rows.append((name, state, on_disk, apparent))
+
+    name_w = max([len("Name")] + [len(r[0]) for r in rows])
+    state_w = max([len("State")] + [len(r[1]) for r in rows])
+    fmt = "%-*s  %-*s  %12s  %12s"
+    header = fmt % (name_w, "Name", state_w, "State", "On disk", "Apparent")
+    print(header)
+    print("-" * len(header))
+    for name, state, on_disk, apparent in rows:
+        print(fmt % (name_w, name, state_w, state,
+                     human(on_disk), human(apparent)))
+    if rows:
+        print("-" * len(header))
+        print(fmt % (name_w, "total", state_w, "", human(total), ""))
 
 
 def cmd_export(args):
@@ -472,7 +644,7 @@ def cmd_export(args):
     for name in names:
         print("exporting %s ..." % name)
         export_vm(name, args.outdir, flatten=not args.no_flatten,
-                  overwrite=args.overwrite)
+                  overwrite=args.overwrite, space_check=not args.no_space_check)
 
 
 def cmd_import(args):
@@ -493,6 +665,7 @@ def cmd_import(args):
         owner=owner,
         start=args.start,
         new_mac=args.new_mac,
+        space_check=not args.no_space_check,
     )
 
 
@@ -515,6 +688,8 @@ def build_parser():
                     help="copy disks as-is; refuse if a backing chain exists")
     pe.add_argument("--overwrite", action="store_true",
                     help="replace an existing bundle dir")
+    pe.add_argument("--no-space-check", action="store_true",
+                    help="skip the destination free-space preflight")
     pe.set_defaults(func=cmd_export)
 
     pi = sub.add_parser("import", help="import a bundle on this host")
@@ -530,6 +705,8 @@ def build_parser():
     pi.add_argument("--new-mac", action="store_true",
                     help="strip fixed MACs so libvirt regenerates them")
     pi.add_argument("--start", action="store_true", help="start the VM after define")
+    pi.add_argument("--no-space-check", action="store_true",
+                    help="skip the destination free-space preflight")
     pi.set_defaults(func=cmd_import)
 
     return p

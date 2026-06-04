@@ -1,4 +1,4 @@
-.TH VIRTPACKER 1 "June 2026" "virtpacker 0.2.0" "User Commands"
+.TH VIRTPACKER 1 "June 2026" "virtpacker 0.3.0" "User Commands"
 .SH NAME
 virtpacker \- export and import libvirt virtual machines as portable bundles
 .SH SYNOPSIS
@@ -12,6 +12,7 @@ virtpacker \- export and import libvirt virtual machines as portable bundles
 .RB [ \-\-all ]
 .RB [ \-\-no\-flatten ]
 .RB [ \-\-overwrite ]
+.RB [ \-\-no\-space\-check ]
 .RI [ NAME ]
 .br
 .B virtpacker
@@ -26,6 +27,7 @@ virtpacker \- export and import libvirt virtual machines as portable bundles
 .IR USER[:GROUP] ]
 .RB [ \-\-new\-mac ]
 .RB [ \-\-start ]
+.RB [ \-\-no\-space\-check ]
 .I BUNDLE
 .SH DESCRIPTION
 .B virtpacker
@@ -35,7 +37,9 @@ store, and the swtpm TPM state. The directory is portable and can be
 imported on another host.
 .PP
 On export, disks are copied and by default flattened into standalone qcow2
-images. The nvram file is carried in the bundle and the domain is switched
+images. Copies are sparse-aware, so holes in a sparse image are preserved
+rather than expanded to zeroes. The nvram file is carried in the bundle and
+the domain is switched
 to UEFI firmware autoselection so the destination host supplies its own
 firmware build. The swtpm state location is read from the domain XML when
 an explicit backend source is present, and otherwise taken from the
@@ -48,7 +52,9 @@ domain is defined.
 .SH COMMANDS
 .TP
 .B list
-List the domains libvirt is aware of.
+List the domains libvirt is aware of, with each domain's state and its
+disk usage shown as size on disk (actual allocation, honoring sparseness)
+and apparent size.
 .TP
 .B export
 Export one domain, or every domain with \fB\-\-all\fR, into bundle
@@ -71,6 +77,10 @@ backing chain.
 .TP
 .B \-\-overwrite
 Replace an existing bundle directory.
+.TP
+.B \-\-no\-space\-check
+Skip the preflight that verifies the output filesystem has room for the
+estimated disk bytes.
 .SS import
 .TP
 .B \-\-images\-dir " " \fIDIR\fR
@@ -95,6 +105,10 @@ on a shared segment.
 .TP
 .B \-\-start
 Start the domain after defining it.
+.TP
+.B \-\-no\-space\-check
+Skip the preflight that verifies each destination filesystem has room for
+the estimated on-disk bytes.
 .SH FILES
 .TP
 .I bundle/manifest.json

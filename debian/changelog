@@ -1,3 +1,16 @@
+virtpacker (0.3.0) unstable; urgency=medium
+
+  * Sparse-aware disk copies. --no-flatten and the import step now copy disk
+    images through `cp --sparse=always --reflink=auto` instead of shutil, so
+    holes in a sparse image are no longer expanded to real zeroes.
+  * `list` now reports per-domain size on disk (st_blocks-based) alongside the
+    apparent size, with a total.
+  * Free-space preflight before export and import: the destination filesystem
+    is checked against the estimated on-disk bytes (with a small margin) and
+    the run aborts early if short. Bypass with --no-space-check.
+
+ -- Bill Prochazka <bprochazka@verostech.com>  Thu, 04 Jun 2026 12:00:00 +0000
+
 virtpacker (0.2.0) unstable; urgency=medium
 
   * Initial release.
